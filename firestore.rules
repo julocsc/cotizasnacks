@@ -1,0 +1,110 @@
+rules_version = '2';
+
+// Reglas recomendadas para Cotizador Pro.
+//
+// La colección `usuarios` es la fuente de verdad de roles y permisos. El rol
+// `admin` tiene acceso completo y es el único que puede crear o modificar
+// perfiles del personal.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function autenticado() {
+      return request.auth != null;
+    }
+
+    function perfil() {
+      return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data;
+    }
+
+    function tienePerfil() {
+      return autenticado() &&
+        exists(/databases/$(database)/documents/usuarios/$(request.auth.uid));
+    }
+
+    function cuentaActiva() {
+      return tienePerfil() && perfil().activo == true;
+    }
+
+    function esAdmin() {
+      return cuentaActiva() && perfil().rol == 'admin';
+    }
+
+    function permiso(nombre) {
+      return esAdmin() ||
+        (cuentaActiva() &&
+          perfil().permisos != null &&
+          perfil().permisos[nombre] == true);
+    }
+
+    // Perfiles del personal. Cada usuario puede leer el suyo; solo el admin
+    // puede listar, crear, editar o desactivar a los demás.
+    //
+    // El `create` propio con correo de la lista de administradores permite
+    // que el primer administrador genere su perfil automáticamente al entrar.
+    // La lista debe coincidir con AppConfig.correosAdministradores en
+    // lib/core/app_config.dart.
+    match /usuarios/{uid} {
+      allow get: if autenticado() && (request.auth.uid == uid || esAdmin());
+      allow list: if esAdmin();
+      allow create: if esAdmin() ||
+        (autenticado() &&
+          request.auth.uid == uid &&
+          request.auth.token.email == 'juliocesica@gmail.com');
+
+      // Cada usuario puede retirar su propia marca de contraseña temporal,
+      // pero no modificar rol, estado, correo ni permisos.
+      allow update: if esAdmin() ||
+        (autenticado() &&
+          request.auth.uid == uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+            ['debeCambiarPassword', 'actualizadoEn']
+          ) &&
+          request.resource.data.debeCambiarPassword == false);
+
+      allow delete: if esAdmin();
+    }
+
+    // Registro temporal de perfiles eliminados por el administrador. Permite
+    // restaurar el acceso si se vuelve a invitar el mismo correo. Solo el
+    // administrador puede leerlo o modificarlo.
+    match /usuarios_eliminados/{uid} {
+      allow read, write: if esAdmin();
+    }
+
+    // Datos y logotipo de la empresa emisora usados en el PDF. Todo el
+    // personal activo puede leerlos; solo el administrador los modifica.
+    match /configuracion/{docId} {
+      allow read: if cuentaActiva();
+      allow write: if esAdmin();
+    }
+
+    match /cotizaciones/{docId} {
+      allow read: if permiso('verHistorial') ||
+        permiso('verIngresos') ||
+        permiso('gestionarClientes');
+      allow create, update, delete: if permiso('crearCotizaciones');
+    }
+
+    // El catálogo se puede leer para cotizar, pero solo se modifica con el
+    // permiso de productos.
+    match /categorias_productos/{docId} {
+      allow read: if cuentaActiva();
+      allow write: if permiso('gestionarProductos');
+    }
+
+    match /productos/{docId} {
+      allow read: if cuentaActiva();
+      allow write: if permiso('gestionarProductos');
+    }
+
+    match /clientes/{docId} {
+      allow read: if cuentaActiva();
+      allow write: if permiso('gestionarClientes') ||
+        permiso('gestionarReservas');
+    }
+
+    match /reservas/{docId} {
+      allow read: if cuentaActiva();
+      allow write: if permiso('gestionarReservas');
+    }
+  }
+}
